@@ -1,17 +1,15 @@
 module.exports = {
   apps: [{
     name: 'mangadex-api',
-    script: './app.js',
+    // 需要 gunicorn 在 PATH 中（先激活 venv 再 pm2 start，或改为绝对路径如 ./venv/bin/gunicorn）
+    script: 'gunicorn',
+    args: '-w 2 -k gthread --threads 8 -b 0.0.0.0:3001 --timeout 120 index:app',
+    interpreter: 'none',
     instances: 1,
     autorestart: true,
     watch: false,
     max_memory_restart: '1G',
     env: {
-      NODE_ENV: 'production',
-      PORT: 3001
-    },
-    env_development: {
-      NODE_ENV: 'development',
       PORT: 3001
     },
     error_file: './logs/pm2-error.log',
@@ -24,11 +22,6 @@ module.exports = {
     max_restarts: 10,
     restart_delay: 4000,
     kill_timeout: 5000,
-    listen_timeout: 10000,
-    exp_backoff_restart_delay: 100,
-    autorestart: true,
-    cron_restart: '0 4 * * *',
-    restart_with_exp_backoff: true,
-    node_args: '--max-old-space-size=1024'
+    exp_backoff_restart_delay: 100
   }]
 }

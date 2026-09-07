@@ -1,38 +1,43 @@
 # MangaDex API 代理服务
 
-一个基于 Express.js 的 MangaDex API 代理服务，符合自定义漫画源格式要求，支持图片代理、缓存和优化功能。
+一个基于 Flask 的 MangaDex RESTful API 代理服务。
 
-## 📋 功能特性
+> Python/Flask 重写版（原为 Express.js），修复了旧版进程级崩溃问题，并支持中文本地化。
 
-- **漫画搜索**：支持关键词搜索和分页
-- **漫画详情**：获取漫画信息、评分、标签和章节统计
-- **图片阅读**：获取漫画章节图片，支持章节选择
-- **图片代理**：自动调整图片尺寸和质量，优化加载速度
-- **智能缓存**：搜索结果和封面图片缓存机制
-- **错误处理**：完善的错误处理和用户友好的提示
+## ✨ 功能特性
+
+- **漫画搜索**：关键词搜索 + 分页，封面经 `includes[]=cover_art` 内联获取（无 N+1 查询）
+- **漫画详情**：标题 / 评分 / 标签 / 章节统计
+- **中文本地化**：根据设备 UA 语言自动回退
+  - 标题：中文设备按 `zh → zh-hk → zh-tw → en → ja-ro` 选择
+  - 章节：按 `zh → zh-hk → en` 去重优选（无中文汉化时回退英文，内容不缺席）
+  - 标签：内置 MangaDex 官方 77 标签中文映射
+- **章节图片**：惰性编号 URL + 请求时实时解析 MD@H 节点（token 过期自动刷新重试）
+- **图片处理**：宽度缩放 / JPEG 质量 / PNG 量化 / LVGL 预解码，适配低性能设备
+- **健壮性**：所有错误按请求隔离返回 JSON（`{"code", "message"}`），无进程级退出
+- **多级缓存**：详情 1h / 章节 10min / MD@H 5min / 搜索 60s / 成品图片 24h
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
-
 ```bash
-npm install express mangadex-full-api axios sharp
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python index.py          # 默认 0.0.0.0:3000，PORT 环境变量可改
 ```
 
-### 2. 运行服务
+生产环境推荐 gunicorn：
 
 ```bash
-node app.js
+gunicorn -w 2 -k gthread --threads 8 -b 0.0.0.0:3001 --timeout 120 index:app
 ```
-
-服务将在 `http://localhost:3000` 启动。
 
 ## 📖 API 文档
 
-### 配置文件
-- **路径**: `GET /config`
-- **描述**: 获取服务配置信息，用于漫画阅读器集成
-- **返回格式**:
+### 源配置
+
+`GET /config`
+
 ```json
 {
   "MangaDex": {
@@ -47,201 +52,105 @@ node app.js
 ```
 
 ### 搜索漫画
-- **路径**: `GET /search/:text` 或 `GET /search/:text/:page`
-- **参数**:
-    - `text`: 搜索关键词
-    - `page`: 页码（可选，默认第1页）
-- **返回格式**:
+
+`GET /search/<text>/<page>`
+
 ```json
 {
   "page": 1,
   "has_more": true,
-  "current_page_results": 10,
   "results": [
     {
       "comic_id": "manga-uuid",
       "title": "漫画标题",
-      "cover_url": "https://your-domain.com/image/proxy?url=..."
+      "cover_url": "http://your-domain.com/comic/manga-uuid/cover",
+      "pages": 0
     }
   ]
 }
 ```
 
-### 获取漫画详情
-- **路径**: `GET /comic/:id`
-- **参数**: `id`: MangaDex 漫画UUID
-- **返回格式**:
+### 漫画详情
+
+`GET /comic/<id>`（id 为 MangaDex UUID）
+
 ```json
 {
   "item_id": "manga-uuid",
   "name": "漫画标题",
-  "page_count": 500,
-  "rate": 8.5,
-  "cover": "https://your-domain.com/image/proxy?url=...&width=256",
-  "tags": ["标签1", "标签2"],
-  "total_chapters": 50
+  "page_count": 14736,
+  "rate": 9.33,
+  "cover": "http://your-domain.com/comic/manga-uuid/cover",
+  "tags": ["动作", "冒险"],
+  "total_chapters": 763
 }
 ```
 
-### 获取漫画图片
-- **路径**: `GET /photo/:id` 或 `GET /photo/:id/ch/:chapter`
-- **参数**:
-    - `id`: 漫画UUID
-    - `chapter`: 章节号（可选，默认第1章）
-- **返回格式**:
+### 章节图片列表
+
+`GET /photo/<id>/ch/<chapter>`（chapter 为去重后的章节序号，从 1 开始）
+
 ```json
 {
   "title": "章节标题",
   "images": [
-    {"url": "https://your-domain.com/image/proxy?url=..."},
-    {"url": "https://your-domain.com/image/proxy?url=..."}
+    { "url": "http://your-domain.com/photo/manga-uuid/ch/1/1.jpg" },
+    { "url": "http://your-domain.com/photo/manga-uuid/ch/1/2.jpg" }
   ]
 }
 ```
 
-### 图片代理服务
-- **路径**: `GET /image/proxy`
-- **查询参数**:
-    - `url`: 原始图片URL（必需）
-    - `width`: 目标宽度（默认600，封面通常由快应用传80）
-    - `quality`: 图片质量（默认50）
-    - `ifPNG`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 PNG
-    - `ifLVGL`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 LVGL 预解码二进制
-- **返回优先级**: `ifLVGL > ifPNG > JPEG`
-- **描述**: 下载、调整大小、压缩并返回适合 Vela 快应用使用的图片或二进制数据
+### 图片接口（封面 / 正文页）
 
-## 🔧 配置说明
+- 封面：`GET /comic/<id>/cover`
+- 正文页：`GET /photo/<id>/ch/<chapter>/<page>.jpg`
 
-### 环境变量（可选）
-创建 `.env` 文件：
-```env
-PORT=3000
-CACHE_TTL=30000
-MAX_CHAPTERS=2000
-```
+查询参数：
 
-### 修改端口
-在 `app.js` 中修改：
-```javascript
-const port = process.env.PORT || 3000;
-```
+| 参数 | 说明 |
+| --- | --- |
+| `width` / `w` | 目标宽度，等比缩放 |
+| `quality` / `q` | 质量 1-100（JPEG 质量 / PNG 量化） |
+| `ifPNG` | `1/true/yes/on` 时返回 PNG |
+| `ifLVGL` | `1/true/yes/on` 时返回 LVGL 预解码二进制（优先于 ifPNG） |
 
-### 缓存配置
-```javascript
-const CACHE_TTL = 30000; // 30秒缓存时间
-const MAX_CHAPTERS = 2000; // 最大获取章节数
-```
+## ☁️ 部署
 
-## 📁 项目结构
+### VPS（PM2 + gunicorn）
 
-```
-mangadex-api/
-├── app.js              # 主应用程序文件
-├── package.json        # 依赖配置
-├── .env               # 环境变量（可选）
-└── README.md          # 说明文档
-```
-
-## ⚙️ 部署建议
-
-### 1. 反向代理配置（Nginx）
-```nginx
-server {
-    listen 443 ssl;
-    server_name your-domain.com;
-    
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-    }
-}
-```
-
-### 2. PM2 进程管理
 ```bash
+pip install -r requirements.txt   # 建议 venv
 npm install -g pm2
-npm run pm2:start
+pm2 start ecosystem.config.js     # 调用 gunicorn，端口 3001
 pm2 save
-pm2 startup
 ```
 
-项目内置的 `ecosystem.config.js` 会启用自动重启、内存限制和每日定时重启。
+> `ecosystem.config.js` 默认调用 PATH 中的 `gunicorn`；如使用 venv，请先激活再 `pm2 start`，或将 `script` 改为绝对路径（如 `./venv/bin/gunicorn`）。
 
-### 3. Docker 部署
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm install --production
-COPY . .
-EXPOSE 3000
-CMD ["node", "app.js"]
-```
+### Vercel
 
-## 🔍 故障排除
+仓库已内置 `vercel.json`（`@vercel/python` → `index.py`），导入仓库即可部署。
 
-### 常见问题
+### EdgeOne Pages
 
-1. **封面图片无法加载**
-    - 检查网络连接
-    - 确认 MangaDex API 服务正常
-    - 查看控制台日志
+仓库已内置 `edgeone.json`（`maxDuration: 120`）与 `cloud-functions/` 双入口（薄 shim，自动加载根目录 `index.py`）。
 
-2. **搜索无结果**
-    - 确认搜索关键词正确
-    - 检查 MangaDex 服务状态
-    - 查看是否有网络限制
+> EdgeOne 会将 `Host` 改写为内部域名，原始域名经 `Eo-Pages-Host` 请求头透传，服务已自动识别。若有异常，可配置环境变量 `PUBLIC_URL=https://your-domain` 强制指定。
 
-3. **图片代理失败**
-    - 检查原始图片URL是否有效
-    - 确认 sharp 库正确安装
-    - 查看内存使用情况
+### 环境变量
 
-### 调试模式
-在代码中添加调试路由：
-```javascript
-app.get("/debug", (req, res) => {
-  res.json({
-    status: "online",
-    version: "1.0.0",
-    cache_size: searchCache.size
-  });
-});
-```
-
-## 📊 性能优化建议
-
-1. **启用缓存**：搜索结果默认缓存30秒
-2. **图片优化**：图片代理自动调整尺寸和质量
-3. **批量处理**：章节获取使用分页机制
-4. **错误恢复**：网络错误时自动重试和降级处理
-
-## 🤝 贡献指南
-
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+| 变量 | 说明 |
+| --- | --- |
+| `PORT` | 本地开发端口（默认 3000；gunicorn 由 `-b` 参数决定） |
+| `PUBLIC_URL` | 强制指定对外 API 基础地址（如 `https://api.example.com`） |
 
 ## ⚠️ 注意事项
 
-- 本项目仅为 MangaDex API 的代理服务，不存储任何漫画内容
-- 请遵守 MangaDex 的使用条款和服务条款
-- 建议在生产环境中配置适当的速率限制
-- 定期更新依赖包以确保安全性
+- 本服务仅为 MangaDex API 的代理，不存储任何漫画内容
+- 请遵守 MangaDex 使用条款；客户端已按 5 req/s 限流设计（搜索探测并发 ≤4、自动重试 429）
+- MangaDex 上部分漫画（如《海贼王》《葬送的芙莉莲》）官方章节为外部链接（MangaPlus 等），本源只返回可直接阅读的章节，因此这些漫画可能显示极少章节或不出现
+- 本地开发请使用 OpenSSL 1.1.1+ 的现代 Python（macOS 系统自带 3.9/LibreSSL 无法与 MangaDex 完成 TLS 握手）
 
-## 📞 支持
+## 📄 许可证
 
-如有问题或建议，请：
-1. 查看现有 Issues
-2. 开启新的 Issue
-3. 查看代码注释和文档
+MIT - 查看 [LICENSE](LICENSE) 了解详情。
