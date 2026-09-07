@@ -260,16 +260,42 @@ def parse_user_agent(user_agent: str) -> dict:
     return device
 
 
+def primary_accept_language(header: str) -> str:
+    """解析 Accept-Language 头，按 q 值取权重最高的语言码（小写）。
+
+    例如 "en,zh-CN;q=0.9,zh;q=0.7" → "en"。解析失败返回 ""。
+    """
+    best_lang = ""
+    best_q = -1.0
+    for part in (header or "").split(","):
+        lang, _, params = part.partition(";")
+        lang = lang.strip().lower()
+        if not lang:
+            continue
+        q = 1.0
+        m = re.search(r"q\s*=\s*([0-9.]+)", params)
+        if m:
+            try:
+                q = float(m.group(1))
+            except ValueError:
+                pass
+        if q > best_q:
+            best_lang, best_q = lang, q
+    return best_lang
+
+
 def is_chinese_locale() -> bool:
+    """语言判定优先级：UA 语言码 > UA 地区 > Accept-Language 首选语言"""
     device = parse_user_agent(request.headers.get("User-Agent", ""))
     language = (device.get("language") or "").lower()
     region = (device.get("region") or "").upper()
-    accept_language = request.headers.get("Accept-Language", "").lower()
-    return (
-        language.startswith("zh")
-        or region in ("CN", "TW", "HK", "MO")
-        or "zh" in accept_language
-    )
+    if language:
+        return language.startswith("zh")
+    if region:
+        return region in ("CN", "TW", "HK", "MO")
+    return primary_accept_language(
+        request.headers.get("Accept-Language", "")
+    ).startswith("zh")
 
 
 def lang_key_for_request() -> str:
